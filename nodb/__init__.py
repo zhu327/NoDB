@@ -2,8 +2,8 @@ from datetime import datetime
 from io import BytesIO
 
 import base64
-import boto3
-import botocore
+# import boto3
+# import botocore
 import hashlib
 import json
 import logging
@@ -11,10 +11,15 @@ import os
 import tempfile
 import uuid
 
+from qcloud_cos import CosConfig
+from qcloud_cos import CosS3Client
+from qcloud_cos.cos_exception import CosServiceError
+
 try:
     import cPickle as pickle
 except Exception:
     import pickle
+
 
 class NoDB(object):
     """
@@ -26,15 +31,11 @@ class NoDB(object):
     ##
 
     bucket = None
-    backend = "s3"
-    region = "us-east-1"
+    region = "ap-guangzhou"
     serializer = "pickle"
     index = "id"
     prefix = ".nodb/"
-    signature_version = "s3v4"
     cache = False
-
-    s3 = boto3.resource('s3', config=botocore.client.Config(signature_version=signature_version))
 
     ##
     # Advanced config
@@ -44,6 +45,14 @@ class NoDB(object):
     human_readable_indexes = False
     hash_function = hashlib.sha256
 
+    def __init__(self, secret_id, secret_key, region=None, token=''):
+        config = CosConfig(
+            Secret_id=secret_id,
+            Secret_key=secret_key,
+            Region=region or self.region,
+            Token=token)
+        self.client = CosS3Client(config)
+
     ##
     # Public Interfaces
     ##
@@ -51,7 +60,6 @@ class NoDB(object):
     def save(self, obj, index=None):
         """
         Save an object to the backend datastore.
-
         Will use this NoDB's index by default if an explicit index isn't supplied.
         """
 
@@ -69,11 +77,17 @@ class NoDB(object):
         bytesIO.write(serialized)
         bytesIO.seek(0)
 
-        s3_object = self.s3.Object(self.bucket, self.prefix + real_index)
-        result = s3_object.put('rb', Body=bytesIO)
-        logging.debug("Put remote bytes: " + self.prefix + real_index)
+        try:
+            response = self.client.put_object(
+                Bucket=self.bucket,
+                Body=bytesIO.read(),
+                Key=self.prefix + real_index,
+            )
+            logging.debug("Put remote bytes: " + self.prefix + real_index)
+        except CosServiceError:
+            logging.exception("Put Error")
 
-        if result['ResponseMetadata']['HTTPStatusCode'] == 200:
+        if 'ETag' in response and response['ETag']:
             resp = True
         else:
             resp = False
@@ -94,7 +108,6 @@ class NoDB(object):
     def load(self, index, metainfo=False, default=None):
         """
         Load an object from the backend datastore.
-
         Returns None if not found.
         """
 
@@ -118,10 +131,13 @@ class NoDB(object):
         # Next, get the bytes (if any)
         if not self.cache or not cache_hit:
             try:
-                serialized_s3 = self.s3.Object(self.bucket, self.prefix + real_index)
-                serialized = serialized_s3.get()["Body"].read()
-            except botocore.exceptions.ClientError as e:
-                # No Key? Return default.
+                response = self.client.get_object(
+                    Bucket=self.bucket,
+                    Key=self.prefix + real_index,
+                )
+                fp = response['Body'].get_raw_stream()
+                serialized = fp.read(response['Content-Length'])
+            except CosServiceError:
                 logging.debug("No remote object, returning default.")
                 return default
 
@@ -141,10 +157,8 @@ class NoDB(object):
 
         # And return the data
         if metainfo:
-            return deserialized['obj'], (
-                                            deserialized['dt'],
-                                            deserialized['uuid']
-                                        )
+            return deserialized['obj'], (deserialized['dt'],
+                                         deserialized['uuid'])
         else:
             return deserialized['obj']
 
@@ -157,14 +171,14 @@ class NoDB(object):
         real_index = self._format_index_value(index)
 
         # Next, get the bytes (if any)
-        serialized_s3 = self.s3.Object(self.bucket, self.prefix + real_index)
-        result = serialized_s3.delete()
+        # serialized_s3 = self.s3.Object(self.bucket, self.prefix + real_index)
+        # result = serialized_s3.delete()
+        self.client.delete_object(
+            Bucket=self.bucket,
+            Key=self.prefix + real_index
+        )
 
-        if result['ResponseMetadata']['HTTPStatusCode'] in [200, 204]:
-            return True
-        else:
-            return False
-
+        return True
 
     ###
     # Private interfaces
@@ -173,7 +187,6 @@ class NoDB(object):
     def _serialize(self, obj):
         """
         Create a NoDB storage item. They exist in the format:
-
         /my_bucket/_nodb/[[index]]
         {
             "serializer:" [[serializer_format]],
@@ -181,7 +194,6 @@ class NoDB(object):
             "uuid": [[uuid4]],
             "obj": [[object being saved]]
         }
-
         """
 
         packed = {}
@@ -195,7 +207,8 @@ class NoDB(object):
         elif self.serializer == 'json':
             packed['obj'] = obj
         else:
-            raise Exception("Unsupported serialize format: " + str(self.serializer))
+            raise Exception(
+                "Unsupported serialize format: " + str(self.serializer))
 
         return json.dumps(packed)
 
@@ -204,23 +217,25 @@ class NoDB(object):
         Unpack and load data from a serialized NoDB entry.
         """
 
-        obj = None
         deserialized = json.loads(serialized)
         return_me = {}
 
         if deserialized['serializer'] == 'pickle':
 
             if self.serializer != 'pickle':
-                raise Exception("Security exception: Won't unpickle if not set to pickle.")
+                raise Exception(
+                    "Security exception: Won't unpickle if not set to pickle.")
 
             # TODO: Python3
-            return_me['obj'] = pickle.loads(base64.b64decode(deserialized['obj']))
+            return_me['obj'] = pickle.loads(
+                base64.b64decode(deserialized['obj']))
 
         elif deserialized['serializer'] == 'json':
             return_me['obj'] = deserialized['obj']
 
         else:
-            raise Exception("Unsupported serialize format: " + deserialized['serializer'])
+            raise Exception(
+                "Unsupported serialize format: " + deserialized['serializer'])
 
         return_me['dt'] = deserialized['dt']
         return_me['uuid'] = deserialized['uuid']
@@ -230,7 +245,6 @@ class NoDB(object):
     def _get_object_index(self, obj, index):
         """
         Get the "Index" value for this object. This may be a hashed index.
-
         If it's a dictionary, get the key.
         If it has that as an attribute, get that attribute as a string.
         If it doesn't have an attribute, or has an illegal attribute, fail.
@@ -238,7 +252,7 @@ class NoDB(object):
 
         index_value = None
         if type(obj) is dict:
-            if obj.has_key(index):
+            if index in obj:
                 index_value = obj[index]
             else:
                 raise Exception("Dict object has no key: " + str(index))

@@ -1,3 +1,16 @@
+# NoDB for Tencent Cloud COS
+
+```python
+from nodb import NoDB
+
+secret_id = 'xxxxxxxx'      # 替换为用户的 secretId
+secret_key = 'xxxxxxx'      # 替换为用户的 secretKey
+region = 'ap-beijing-1'     # 替换为用户的 Region
+token = ''                  # 使用临时密钥需要传入 Token，默认为空，可不填
+
+nodb = NoDB(secret_id, secret_key, region, token)
+```
+
 <img src="http://i.imgur.com/ZymFZd8.jpg" width="400"/>
 
 # NoDB

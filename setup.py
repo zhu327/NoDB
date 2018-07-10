@@ -1,5 +1,4 @@
 import os
-import sys
 from setuptools import setup
 
 # Set external files
@@ -12,16 +11,11 @@ except ImportError:
 with open(os.path.join(os.path.dirname(__file__), 'requirements.txt')) as f:
     required = f.read().splitlines()
 
-with open(os.path.join(os.path.dirname(__file__), 'test_requirements.txt')) as f:
-    test_required = f.read().splitlines()
-
 setup(
     name='nodb',
     version='0.3.3',
     packages=['nodb'],
     install_requires=required,
-    tests_require=test_required,
-    test_suite='nose.collector',
     include_package_data=True,
     license='MIT License',
     description="NoDB isn't a database.. but it sort of looks like one.",
